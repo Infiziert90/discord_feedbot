@@ -19,7 +19,7 @@ from configparser import ConfigParser
 from datetime import datetime
 from importlib import reload
 from urllib.parse import urljoin
-from aiohttp.web_exceptions import HTTPError, HTTPNotModified
+from aiohttp.web_exceptions import HTTPForbidden, HTTPNotModified
 from dateutil.parser import parse as parse_datetime
 from html2text import HTML2Text
 
@@ -79,6 +79,8 @@ def get_config():
 
     logging.basicConfig(level=log_level)
     log = logging.getLogger(__name__)
+    # suppress poll infos from asyncio
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
     log.addHandler(logging.FileHandler("output.log"))
     log.setLevel(log_level)
     warnings.resetwarnings()
@@ -413,13 +415,16 @@ async def background_check_feed(conn, feed, asyncioloop):
                     # some sort of internal error thing:
                     if http_response.status is None:
                         logger.error(f"{feed}:HTTP response code is NONE")
-                        raise HTTPError()
+                        http_response.close()
+                        # raise not HTTPError because this is giving me NoneType errors
+                        raise HTTPForbidden()
                     # Some feeds are smart enough to use that if-modified-since or
                     # etag info, which gives us a 304 status.  If that happens,
                     # assume no new items, fall through rest of this and try again
                     # later.
                     elif http_response.status == 304:
                         logger.debug(f"{feed}:data is old; moving on")
+                        http_response.close()
                         raise HTTPNotModified()
                     # If we get anything but a 200, that's a problem and we don't
                     # have good data, so give up and try later.
@@ -427,7 +432,9 @@ async def background_check_feed(conn, feed, asyncioloop):
                     # clearer.
                     elif http_response.status != 200:
                         logger.debug(f"{feed}:HTTP error not 200")
-                        raise HTTPError()
+                        http_response.close()
+                        # raise not HTTPError because this is giving me NoneType errors
+                        raise HTTPForbidden()
                     else:
                         logger.debug(f"{feed}:HTTP success")
 
@@ -489,7 +496,8 @@ async def background_check_feed(conn, feed, asyncioloop):
             logger.debug(f"{feed}:processing entries")
             if feed_data is None:
                 logger.error(f"{feed}:no data in feed_data")
-                raise HTTPError()
+                # raise not HTTPError because this is giving me NoneType errors
+                raise HTTPForbidden()
             for item in reversed(feed_data.entries):
                 logger.debug(f"{feed}:item:processing this entry:{item}")
 
@@ -588,8 +596,8 @@ async def background_check_feed(conn, feed, asyncioloop):
             logger.debug(sys.exc_info())
         # Many feeds have random periodic problems that shouldn't cause
         # permanent death:
-        except HTTPError:
-            logger.warning(f"{feed}:Unexpected HTTP error:")
+        except HTTPForbidden:
+            logger.warning(f"{feed}:Unexpected HTTPError:")
             logger.warning(sys.exc_info())
             logger.warning(f"{feed}:Assuming error is transient and trying again later")
         # sqlite3 errors are probably really bad and we should just totally
@@ -611,6 +619,10 @@ async def background_check_feed(conn, feed, asyncioloop):
         except aiohttp.client_exceptions.ClientConnectorError:
             logger.error(f"{datetime.today()}: Connection failed!")
         # unknown error: definitely give up and die and move on
+        except asyncio.CancelledError:
+            logger.info("Task was cancelled, closing everything and die")
+            asyncio.get_event_loop().stop()
+            return
         except Exception:
             logger.exception("Unexpected error - giving up")
             raise
