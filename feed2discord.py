@@ -408,7 +408,7 @@ async def background_check_feed(conn, feed, asyncioloop):
             logger.debug(f"{feed}:sending http request for {feed_url}")
             feed_data = None
             # Send actual request.
-            with aiohttp.ClientSession() as sess:
+            async with aiohttp.ClientSession() as sess:
                 async with sess.get(feed_url, headers=http_headers) as http_response:
                     logger.debug(http_response)
                     # First check that we didn't get a "None" response, since that's
@@ -592,39 +592,39 @@ async def background_check_feed(conn, feed, asyncioloop):
 
         # This is completely expected behavior for a well-behaved feed:
         except HTTPNotModified:
-            logger.debug(f"{feed}:Headers indicate feed unchanged since last time fetched:")
+            logger.debug(f"{datetime.today()}:{feed}: Headers indicate feed unchanged since last time fetched:")
             logger.debug(sys.exc_info())
         # Many feeds have random periodic problems that shouldn't cause
         # permanent death:
         except HTTPForbidden:
-            logger.warning(f"{feed}:Unexpected HTTPError:")
+            logger.warning(f"{datetime.today()}:{feed}: Unexpected HTTPError:")
             logger.warning(sys.exc_info())
-            logger.warning(f"{feed}:Assuming error is transient and trying again later")
+            logger.warning(f"{datetime.today()}:{feed}: Assuming error is transient and trying again later")
         # sqlite3 errors are probably really bad and we should just totally
         # give up on life
         except sqlite3.Error as sqlerr:
-            logger.error(f"{feed}:sqlite3 error: ")
+            logger.error(f"{datetime.today()}:{feed}: sqlite3 error: ")
             logger.error(sys.exc_info())
             logger.error(sqlerr)
             raise
         # Ideally we'd remove the specific channel or something...
         # But I guess just throw an error into the log and try again later...
         except discord.errors.Forbidden:
-            logger.error(f"{feed}:discord.errors.Forbidden")
+            logger.error(f"{datetime.today()}:{feed}: discord.errors.Forbidden")
             logger.error(sys.exc_info())
-            logger.error(f"{feed}:Perhaps bot isn't allowed in one of the channels for this feed?")
+            logger.error(f"{datetime.today()}:{feed}: Perhaps bot isn't allowed in one of the channels for this feed?")
             # raise # or not? hmm...
         except asyncio.TimeoutError:
-            logger.error(f"{datetime.today()}--timeout error")
+            logger.error(f"{datetime.today()}:{feed}: Timeout error")
         except aiohttp.client_exceptions.ClientConnectorError:
-            logger.error(f"{datetime.today()}: Connection failed!")
+            logger.error(f"{datetime.today()}:{feed}: Connection failed!")
+        except aiohttp.client_exceptions.ClientOSError:
+            logger.error(f"{datetime.today()}:{feed}: Connection not responding!")
+        except aiohttp.ServerDisconnectedError:
+            logger.error(f"{datetime.today()}:{feed}: Socket closed by peer")
         # unknown error: definitely give up and die and move on
-        except asyncio.CancelledError:
-            logger.info("Task was cancelled, closing everything and die")
-            asyncio.get_event_loop().stop()
-            return
-        except Exception:
-            logger.exception("Unexpected error - giving up")
+        except BaseException:
+            logger.exception(f"{datetime.today()}:{feed}: Unexpected error - giving up")
             raise
         # No matter what goes wrong, wait same time and try again
         finally:
@@ -653,7 +653,7 @@ def main():
         if "login_token" in MAIN:
             loop.run_until_complete(client.login(MAIN.get("login_token")))
         loop.run_until_complete(client.connect())
-    except Exception:
+    except BaseException:
         loop.run_until_complete(client.close())
     finally:
         loop.close()
