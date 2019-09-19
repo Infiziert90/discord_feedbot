@@ -71,3 +71,5 @@ DEADJOE
 # sqlite DB file
 *.db
 feed2discord.local.ini
+
+.idea/

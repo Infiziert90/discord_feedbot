@@ -15,6 +15,7 @@ import warnings
 import aiohttp
 import discord
 import feedparser
+import logging.handlers
 from configparser import ConfigParser
 from datetime import datetime
 from importlib import reload
@@ -22,9 +23,10 @@ from urllib.parse import urljoin
 from aiohttp.web_exceptions import HTTPForbidden, HTTPNotModified
 from dateutil.parser import parse as parse_datetime
 from html2text import HTML2Text
+from bs4 import BeautifulSoup
 
 
-__version__ = "3.0.0r"
+__version__ = "3.2.0r"
 
 PROG_NAME = "feedbot"
 USER_AGENT = f"{PROG_NAME}{__version__}"
@@ -81,7 +83,7 @@ def get_config():
     log = logging.getLogger(__name__)
     # suppress poll infos from asyncio
     logging.getLogger('asyncio').setLevel(logging.WARNING)
-    log.addHandler(logging.FileHandler("output.log"))
+    log.addHandler(logging.handlers.TimedRotatingFileHandler("output.log", when='W0', backupCount=3))
     log.setLevel(log_level)
     warnings.resetwarnings()
 
@@ -163,7 +165,7 @@ def extract_best_item_date(item, tzinfo):
     return tzinfo.localize(datetime.now())
 
 
-def process_field(field, item, FEED, channel):
+def process_field(field, item, feed, channel):
     """
     This looks at the field from the config, and returns the processed string
     naked item in fields: return that field from the feed item
@@ -171,9 +173,9 @@ def process_field(field, item, FEED, channel):
     " around the field: string literal
     Added new @, turns each comma separated tag into a group mention
     """
-    logger.debug(f"{FEED}:process_field:{field}: started")
+    logger.debug(f"{feed}:process_field:{field}: started")
 
-    item_url_base = FEED.get('item_url_base', None)
+    item_url_base = feed.get('item_url_base', None)
     if field == 'guid' and item_url_base is not None:
         if 'guid' in item:
             return item_url_base + item['guid']
@@ -181,7 +183,7 @@ def process_field(field, item, FEED, channel):
             logger.error('process_field:guid:no such field; try show_sample_entry.py on feed')
             return ""
 
-    logger.debug(f"{FEED}:process_field:{field}: checking regexes")
+    logger.debug(f"{feed}:process_field:{field}: checking regexes")
     stringmatch = re.match('^"(.+?)"$', field)
     highlightmatch = re.match('^([*_~<]+)(.+?)([*_~>]+)$', field)
     bigcodematch = re.match('^```(.+)```$', field)
@@ -191,17 +193,17 @@ def process_field(field, item, FEED, channel):
 
     if stringmatch is not None:
         # Return an actual string literal from config:
-        logger.debug(f"{FEED}:process_field:{field}:isString")
+        logger.debug(f"{feed}:process_field:{field}:isString")
         return stringmatch.group(1)  # string from config
     elif highlightmatch is not None:
-        logger.debug(f"{FEED}:process_field:{field}:isHighlight")
+        logger.debug(f"{feed}:process_field:{field}:isHighlight")
 
         # If there's any markdown on the field, return field with that
         # markup on it:
         begin, field, end = highlightmatch.groups()
         if field in item:
             if field == "link":
-                url = urljoin(FEED.get("feed-url"), item[field])
+                url = urljoin(feed.get("feed-url"), item[field])
                 return begin + url + end
             else:
                 return begin + item[field] + end
@@ -210,7 +212,7 @@ def process_field(field, item, FEED, channel):
             return ""
 
     elif bigcodematch is not None:
-        logger.debug(f"{FEED}:process_field:{field}:isCodeBlock")
+        logger.debug(f"{feed}:process_field:{field}:isCodeBlock")
 
         # Code blocks are a bit different, with a newline and stuff:
         field = bigcodematch.group(1)
@@ -221,7 +223,7 @@ def process_field(field, item, FEED, channel):
             return ""
 
     elif codematch is not None:
-        logger.debug(f"{FEED}:process_field:{field}:isCode")
+        logger.debug(f"{feed}:process_field:{field}:isCode")
 
         # Since code chunk can't have other highlights, also do them
         # separately:
@@ -233,7 +235,7 @@ def process_field(field, item, FEED, channel):
             return ""
 
     elif tagmatch is not None:
-        logger.debug(f"{FEED}:process_field:{field}:isTag")
+        logger.debug(f"{feed}:process_field:{field}:isTag")
         field = tagmatch.group(1)
         if field in item:
             # Assuming tags are ', ' separated
@@ -251,13 +253,13 @@ def process_field(field, item, FEED, channel):
             return ""
 
     else:
-        logger.debug(f"{FEED}:process_field:{field}:isPlain")
+        logger.debug(f"{feed}:process_field:{field}:isPlain")
         # Just asking for plain field:
         if field in item:
             # If field is special field "link",
             # then use urljoin to turn relative URLs into absolute URLs
             if field == 'link':
-                return urljoin(FEED.get('feed_url'), item[field])
+                return urljoin(feed.get('feed_url'), item[field])
             # Else assume it's a "summary" or "content" or whatever field
             # and turn HTML into markdown and don't add any markup:
             else:
@@ -281,7 +283,7 @@ def process_field(field, item, FEED, channel):
             return ""
 
 
-def build_message(FEED, item, channel):
+def build_message(feed, item, channel):
     """
     This builds a message.
 
@@ -292,11 +294,11 @@ def build_message(FEED, item, channel):
     truncates if too long.
     """
     message = ''
-    fieldlist = FEED.get(channel['name'] + '.fields', FEED.get('fields', 'id,description')).split(',')
+    fieldlist = feed.get(channel['name'] + '.fields', feed.get('fields', 'id,description')).split(',')
     # Extract fields in order
     for field in fieldlist:
         logger.debug(f"feed:item:build_message:{field}:added to message")
-        message += process_field(field, item, FEED, channel) + "\n"
+        message += process_field(field, item, feed, channel) + "\n"
 
     # Naked spaces are terrible:
     message = re.sub(' +\n', '\n', message)
@@ -310,9 +312,9 @@ def build_message(FEED, item, channel):
     return message
 
 
-async def send_message_wrapper(asyncioloop, feed, channel, message):
+async def send_message_wrapper(async_loop, feed, channel, message):
     """ This schedules an 'actually_send_message' coroutine to run """
-    asyncioloop.create_task(actually_send_message(channel, message, feed))
+    async_loop.create_task(actually_send_message(channel, message, feed))
     logger.debug(f"{feed}:{channel['name']}:message scheduled")
 
 
@@ -322,11 +324,11 @@ async def actually_send_message(channel, message, feed):
     logger.debug(f"{feed}:{channel['name']}:message sent: {message!r}")
 
 
-async def background_check_feed(conn, feed, asyncioloop):
+async def background_check_feed(conn, feed, async_loop):
     """
     The main work loop
     One of these is run for each feed.
-    It's an asyncio thing. "yield from" (sleep or I/O) returns to main loop
+    It's an asyncio thing. "await" (sleep or I/O) returns to main loop
     and gives other feeds a chance to run.
     """
     logger.info(f'{feed}: Starting up background_check_feed')
@@ -339,18 +341,18 @@ async def background_check_feed(conn, feed, asyncioloop):
     user_agent = config["MAIN"].get("user_agent", USER_AGENT)
 
     # just a bit easier to use...
-    FEED = config[feed]
+    _feed = config[feed]
 
     # pull config for this feed out:
-    feed_url = FEED.get('feed_url')
-    rss_refresh_time = FEED.getint('rss_refresh_time', 3600)
-    start_skew = FEED.getint('start_skew', rss_refresh_time)
-    start_skew_min = FEED.getint('start_skew_min', 1)
-    max_age = FEED.getint('max_age', 86400)
+    feed_url = _feed.get('feed_url')
+    rss_refresh_time = _feed.getint('rss_refresh_time', 3600)
+    start_skew = _feed.getint('start_skew', rss_refresh_time)
+    start_skew_min = _feed.getint('start_skew_min', 1)
+    max_age = _feed.getint('max_age', 86400)
 
     # loop through all the channels this feed is configured to send to
     channels = []
-    for key in FEED.get('channels').split(','):
+    for key in _feed.get('channels').split(','):
         logger.debug(feed + ': adding channel ' + key)
         # stick a dict in the channels array so we have more to work with
         channels.append(
@@ -446,20 +448,32 @@ async def background_check_feed(conn, feed, asyncioloop):
                     if feed_url == "https://www.wakanim.tv/de/v2":
                         ghettorss = """<?xml version="1.0" encoding="UTF-8" ?>
                         <rss version="2.0">
-        
+
                         <channel>
                         <title>Wakanim</title>
                         <link>https://www.wakanim.tv/</link>
                         <description>Wakanim Anime</description>
                         """
-                        for i in re.findall(r'class="slider_item_star" href="([^"]*)', http_data.decode("utf-8")):
-                            epname = re.sub(r'/[a-z]*/v2/catalogue/episode/[0-9]*/', '', i)
-                            epname = re.sub(r'-', ' ', epname).title()
-                            ghettorss += "<item>\n<title>"
-                            ghettorss += epname
-                            ghettorss += "</title>\n<link>"
-                            ghettorss += "https://www.wakanim.tv" + i
-                            ghettorss += '</link></item>\n'
+                        now = datetime.now()
+                        calendar_link = f"https://www.wakanim.tv/de/v2/agenda/getevents?s={now.day-1:02}-" \
+                                        f"{now.month:02}-{now.year}&e={now.day+1:02}-{now.month:02}-{now.year}" \
+                                        f"&free=false"
+                        async with sess.get(calendar_link, headers=http_headers) as calendar_page:
+                            calendar_data = await calendar_page.read()
+                        calendar_soup = BeautifulSoup(calendar_data, features="lxml")
+                        links = [f"https://www.wakanim.tv{x['href']}" for x in
+                                 calendar_soup.findAll("a", {"class": "Calendar-epTitle"})]
+                        for link in links:
+                            async with sess.get(link, headers=http_headers) as hack_response:
+                                hack_data = await hack_response.read()
+                            anime_soup = BeautifulSoup(hack_data, features="lxml")
+                            eps = anime_soup.findAll("a", {"class": "slider_item_link"})
+                            for ep in eps:
+                                ghettorss += "<item>\n<title>"
+                                ghettorss += ep["title"]
+                                ghettorss += "</title>\n<link>"
+                                ghettorss += f"https://www.wakanim.tv{ep['href']}"
+                                ghettorss += '</link></item>\n'
 
                         ghettorss += '</channel></rss>'
                         http_data = ghettorss
@@ -485,7 +499,8 @@ async def background_check_feed(conn, feed, asyncioloop):
                     if 'LAST-MODIFIED' in http_response.headers:
                         modified = http_response.headers['LAST-MODIFIED']
                         logger.debug(f"{feed}:saving lastmodified: {modified}")
-                        cursor.execute("UPDATE feed_info SET lastmodified=? where feed=? or url=?", [modified, feed, feed_url])
+                        cursor.execute("UPDATE feed_info SET lastmodified=? where feed=? or url=?",
+                                       [modified, feed, feed_url])
                         conn.commit()
                         logger.debug(f"{feed}:saved lastmodified")
                     else:
@@ -544,39 +559,44 @@ async def background_check_feed(conn, feed, asyncioloop):
                         # Loop over all channels for this particular feed
                         # and process appropriately:
                         for channel in channels:
+                            # just a bit easier to use...
+                            _name = channel['name']
+
                             include = True
-                            filter_field = FEED.get(channel['name'] + '.filter_field', FEED.get('filter_field', 'title'))
+                            filter_field = _feed.get(f"{_name}.filter", _feed.get('filter_field', 'title'))
                             # Regex if channel exists
-                            if (channel['name'] + '.filter') in FEED or 'filter' in FEED:
-                                logger.debug(f"{feed}:item:running filter for {channel['name']}")
-                                regexpat = FEED.get(channel['name'] + '.filter', FEED.get('filter', '^.*$'))
-                                logger.debug(f"{feed}:item:using filter: {regexpat} on {item['title']} field {filter_field}")
-                                regexmatch = re.search(regexpat, item[filter_field])
-                                if regexmatch is None:
+                            if f"{_name}.filter" in _feed or 'filter' in _feed:
+                                logger.debug(f"{feed}:item:running filter for {_name}")
+                                re_pat = _feed.get(f"{_name}.filter", _feed.get('filter', '^.*$'))
+                                logger.debug(f"{feed}:item:using filter: {re_pat} on "
+                                             f"{item['title']} field {filter_field}")
+                                re_match = re.search(re_pat, item[filter_field])
+                                if re_match is None:
                                     include = False
-                                    logger.info(f"{feed}:item:failed filter for {channel['name']}")
-                            elif (channel['name'] + '.filter_exclude') in FEED or 'filter_exclude' in FEED:
-                                logger.debug(f"{feed}:item:running exclude filter for{channel['name']}")
-                                regexpat = FEED.get(channel['name'] + '.filter_exclude', FEED.get('filter_exclude', '^.*$'))
-                                logger.debug(f"{feed}:item:using filter_exclude: {regexpat} on {item['title']} field {filter_field}")
-                                regexmatch = re.search(regexpat, item[filter_field])
-                                if regexmatch is None:
+                                    logger.info(f"{feed}:item:failed filter for {_name}")
+                            elif f"{_name}.filter_exclude" in _feed or 'filter_exclude' in _feed:
+                                logger.debug(f"{feed}:item:running exclude filter for{_name}")
+                                re_pat = _feed.get(f"{_name}.filter_exclude", _feed.get('filter_exclude', '^.*$'))
+                                logger.debug(f"{feed}:item:using filter_exclude: {re_pat} on "
+                                             f"{item['title']} field {filter_field}")
+                                re_match = re.search(re_pat, item[filter_field])
+                                if re_match is None:
                                     include = True
-                                    logger.info(f"{feed}:item:passed exclude filter for {channel['name']}")
+                                    logger.info(f"{feed}:item:passed exclude filter for {_name}")
                                 else:
                                     include = False
-                                    logger.info(f"{feed}:item:failed exclude filter for {channel['name']}")
+                                    logger.info(f"{feed}:item:failed exclude filter for {_name}")
                             else:
                                 include = True  # redundant safety net
-                                logger.debug(f"{feed}:item:no filter configured for {channel['name']}")
+                                logger.debug(f"{feed}:item:no filter configured for {_name}")
 
                             if include is True:
-                                logger.debug(f"{feed}:item:building message for {channel['name']}")
-                                message = build_message(FEED, item, channel)
-                                logger.debug(f"{feed}:item:sending message (eventually) to {channel['name']}")
-                                await send_message_wrapper(asyncioloop, feed, channel, message)
+                                logger.debug(f"{feed}:item:building message for {_name}")
+                                message = build_message(_feed, item, channel)
+                                logger.debug(f"{feed}:item:sending message (eventually) to {_name}")
+                                await send_message_wrapper(async_loop, feed, channel, message)
                             else:
-                                logger.info(f"{feed}:item:skipping item due to not passing filter for {channel['name']}")
+                                logger.info(f"{feed}:item:skipping item due to not passing filter for {_name}")
 
                     else:
                         # Logs of debugging info for date handling stuff...
@@ -613,19 +633,19 @@ async def background_check_feed(conn, feed, asyncioloop):
             logger.error(f"{datetime.today()}:{feed}: discord.errors.Forbidden")
             logger.error(sys.exc_info())
             logger.error(f"{datetime.today()}:{feed}: Perhaps bot isn't allowed in one of the channels for this feed?")
-            # raise # or not? hmm...
+            # raise  # or not? hmm...
         except asyncio.TimeoutError:
             logger.error(f"{datetime.today()}:{feed}: Timeout error")
-        except aiohttp.client_exceptions.ClientConnectorError:
+        except aiohttp.ClientConnectorError:
             logger.error(f"{datetime.today()}:{feed}: Connection failed!")
-        except aiohttp.client_exceptions.ClientOSError:
+        except aiohttp.ClientOSError:
             logger.error(f"{datetime.today()}:{feed}: Connection not responding!")
         except aiohttp.ServerDisconnectedError:
             logger.error(f"{datetime.today()}:{feed}: Socket closed by peer")
         # unknown error: definitely give up and die and move on
         except BaseException:
             logger.exception(f"{datetime.today()}:{feed}: Unexpected error - giving up")
-            raise
+            # raise  # or not? hmm...
         # No matter what goes wrong, wait same time and try again
         finally:
             logger.debug(f"{feed}:sleeping for {str(rss_refresh_time)} seconds")
