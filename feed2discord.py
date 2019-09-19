@@ -23,8 +23,6 @@ from urllib.parse import urljoin
 from aiohttp.web_exceptions import HTTPForbidden, HTTPNotModified
 from dateutil.parser import parse as parse_datetime
 from html2text import HTML2Text
-from bs4 import BeautifulSoup
-
 
 __version__ = "3.2.0r"
 
@@ -53,7 +51,6 @@ CREATE TABLE IF NOT EXISTS feed_items (
 SQL_CLEAN_OLD_ITEMS = """
 DELETE FROM feed_items WHERE (julianday() - julianday(published)) > 365
 """
-
 
 if not sys.version_info[:2] >= (3, 6):
     print("Error: requires python 3.6 or newer")
@@ -443,40 +440,6 @@ async def background_check_feed(conn, feed, async_loop):
                     # pull data out of the http response
                     logger.debug(f"{feed}:reading http response")
                     http_data = await http_response.read()
-
-                    # wakanim hack
-                    if feed_url == "https://www.wakanim.tv/de/v2":
-                        ghettorss = """<?xml version="1.0" encoding="UTF-8" ?>
-                        <rss version="2.0">
-
-                        <channel>
-                        <title>Wakanim</title>
-                        <link>https://www.wakanim.tv/</link>
-                        <description>Wakanim Anime</description>
-                        """
-                        now = datetime.now()
-                        calendar_link = f"https://www.wakanim.tv/de/v2/agenda/getevents?s={now.day-1:02}-" \
-                                        f"{now.month:02}-{now.year}&e={now.day+1:02}-{now.month:02}-{now.year}" \
-                                        f"&free=false"
-                        async with sess.get(calendar_link, headers=http_headers) as calendar_page:
-                            calendar_data = await calendar_page.read()
-                        calendar_soup = BeautifulSoup(calendar_data, features="lxml")
-                        links = [f"https://www.wakanim.tv{x['href']}" for x in
-                                 calendar_soup.findAll("a", {"class": "Calendar-epTitle"})]
-                        for link in links:
-                            async with sess.get(link, headers=http_headers) as hack_response:
-                                hack_data = await hack_response.read()
-                            anime_soup = BeautifulSoup(hack_data, features="lxml")
-                            eps = anime_soup.findAll("a", {"class": "slider_item_link"})
-                            for ep in eps:
-                                ghettorss += "<item>\n<title>"
-                                ghettorss += ep["title"]
-                                ghettorss += "</title>\n<link>"
-                                ghettorss += f"https://www.wakanim.tv{ep['href']}"
-                                ghettorss += '</link></item>\n'
-
-                        ghettorss += '</channel></rss>'
-                        http_data = ghettorss
 
                     # parse the data from the http response with feedparser
                     logger.debug(f"{feed}:parsing http data")
